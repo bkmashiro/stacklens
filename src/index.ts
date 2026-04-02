@@ -1,20 +1,67 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import path from 'node:path'
 
 import chalk from 'chalk'
 import { Command } from 'commander'
 
 import { formatAudit, formatComparison, formatJson, formatSummary, formatTree } from './formatter.js'
+import { detectCircularDependencies } from './circular.js'
 import { analyzeProject, buildGraph } from './graph.js'
 import { RegistryClient } from './registry.js'
+import { formatTreemapBreakdown, generateTreemap } from './treemap.js'
 
 const program = new Command()
 const client = new RegistryClient()
+const require = createRequire(import.meta.url)
+const packageJson = require('../package.json') as { version: string }
 
 program
   .name('stacklens')
   .description('Analyze npm package dependency graphs')
-  .version('0.1.0')
+  .version(packageJson.version)
+  .option('--circular <target>', 'Detect circular imports in a local source tree')
+  .option('--treemap <output>', 'Generate a dependency treemap HTML file')
+  .action(async (options) => {
+    if (options.circular) {
+      const cycles = await detectCircularDependencies(options.circular)
+      const labelBase = path.resolve(options.circular)
+
+      if (cycles.length === 0) {
+        console.log('No circular dependency chains found.')
+      } else {
+        console.log('Circular dependency chains found:')
+        console.log('')
+        for (const cycle of cycles) {
+          const icon = cycle.nodeCount >= 3 ? '🔴' : '🟡'
+          const reason =
+            cycle.nodeCount >= 3 ? 'breaks tree-shaking' : 'tight two-module coupling'
+          const chain = cycle.chain
+            .map((entry) => path.relative(process.cwd(), entry) || path.relative(labelBase, entry))
+            .join(' → ')
+          console.log(`  ${icon} ${chain}`)
+          console.log(`     (${cycle.nodeCount}-node cycle, ${reason})`)
+          console.log('')
+        }
+        console.log(`${cycles.length} circular chains found.`)
+        console.log('Fix: extract shared code to a new module that neither imports.')
+      }
+    }
+
+    if (options.treemap) {
+      const nodes = await generateTreemap(options.treemap)
+      console.log(chalk.cyan(`Analyzing ${nodes.length} dependencies...`))
+      console.log(`Generated: ${options.treemap}`)
+      console.log('')
+      console.log('  Size breakdown:')
+      console.log(formatTreemapBreakdown(nodes))
+    }
+
+    if (!options.circular && !options.treemap) {
+      program.outputHelp()
+    }
+  })
 
 program
   .command('analyze')
